@@ -1,0 +1,1132 @@
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+
+/* ═══════════════════════════════════════════════════════════════
+   CONSTANTS
+═══════════════════════════════════════════════════════════════ */
+const STORAGE_KEYS = {
+  transactions: "et_transactions_v5",
+  limit: "et_limit_v5",
+  theme: "et_theme_v5",
+};
+
+const INCOME_CATS = ["💼 Salary", "💰 Business", "🎁 Gift", "💻 Freelance", "📊 Investment"];
+const EXPENSE_CATS = ["🍔 Food", "🚗 Transport", "🛒 Shopping", "💊 Health", "📚 Education",
+  "🎬 Entertainment", "🏠 Rent", "⚡ Utilities", "📦 Other"];
+
+const PALETTE = ["#f5c842","#ff5e5e","#4ecb71","#5b8fff","#ff9f43","#a29bfe","#fd79a8","#00cec9","#e17055"];
+const ANIM_MS = 500;
+
+/* ═══════════════════════════════════════════════════════════════
+   PURE HELPERS  (no side-effects, no state)
+═══════════════════════════════════════════════════════════════ */
+function parseDate(str) {
+  const parts = str.split("-");
+  if (parts.length !== 3) return new Date(str);
+  return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+}
+
+function sameMonth(dateStr, ref) {
+  const d = parseDate(dateStr);
+  return d.getMonth() === ref.getMonth() && d.getFullYear() === ref.getFullYear();
+}
+
+function inPeriod(dateStr, period, from, to) {
+  const d = parseDate(dateStr);
+  const now = new Date();
+  if (period === "month") return sameMonth(dateStr, now);
+  if (period === "3months") {
+    const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 3); cutoff.setDate(1);
+    return d >= cutoff;
+  }
+  if (period === "year") return d.getFullYear() === now.getFullYear();
+  if (period === "custom" && from && to) {
+    const f = parseDate(from), t2 = parseDate(to); t2.setHours(23, 59, 59);
+    return d >= f && d <= t2;
+  }
+  return true;
+}
+
+function fmt(n) {
+  return "₹" + Math.abs(n).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+function n2(n) {
+  return (+n).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function computeStats(transactions) {
+  const now = new Date();
+  let totalIncome = 0, totalExpense = 0, monthIncome = 0, monthExpense = 0;
+  const catMap = {}, monthMap = {};
+  transactions.forEach((t) => {
+    const amt = t.amount;
+    if (t.type === "income") {
+      totalIncome += amt;
+      if (sameMonth(t.date, now)) monthIncome += amt;
+    } else {
+      totalExpense += amt;
+      catMap[t.category] = (catMap[t.category] || 0) + amt;
+      if (sameMonth(t.date, now)) monthExpense += amt;
+    }
+    const d = parseDate(t.date);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    if (!monthMap[key]) monthMap[key] = { income: 0, expense: 0 };
+    if (t.type === "income") monthMap[key].income += amt;
+    else monthMap[key].expense += amt;
+  });
+  const savingsRate = monthIncome > 0
+    ? Math.max(0, Math.min(100, Math.round((monthIncome - monthExpense) / monthIncome * 100))) : 0;
+  const catSorted = Object.entries(catMap).sort((a, b) => b[1] - a[1]);
+  return { totalIncome, totalExpense, balance: totalIncome - totalExpense,
+    monthIncome, monthExpense, savingsRate, catMap, catSorted, monthMap };
+}
+
+function getFiltered(transactions, filter) {
+  let list = [...transactions];
+  if (filter.type !== "all") list = list.filter((t) => t.type === filter.type);
+  if (filter.period !== "all") list = list.filter((t) => inPeriod(t.date, filter.period, filter.dateFrom, filter.dateTo));
+  if (filter.search.trim()) {
+    const q = filter.search.toLowerCase();
+    list = list.filter((t) => t.desc.toLowerCase().includes(q) || t.category.toLowerCase().includes(q));
+  }
+  list.sort((a, b) => {
+    let cmp = 0;
+    if (filter.sortBy === "amount") cmp = a.amount - b.amount;
+    else if (filter.sortBy === "category") cmp = a.category.localeCompare(b.category);
+    else cmp = parseDate(a.date) - parseDate(b.date);
+    return filter.sortDir === "asc" ? cmp : -cmp;
+  });
+  return list;
+}
+
+function getRunningBalances(list) {
+  const sorted = [...list].sort((a, b) => parseDate(a.date) - parseDate(b.date));
+  let running = 0;
+  const map = {};
+  sorted.forEach((t) => { running += t.type === "income" ? t.amount : -t.amount; map[t.id] = running; });
+  return map;
+}
+
+function validateTx(fields) {
+  const errors = [];
+  if (!fields.desc?.trim()) errors.push("Description is required.");
+  const amt = parseFloat(fields.amount);
+  if (isNaN(amt) || amt <= 0) errors.push("Enter a valid positive amount.");
+  if (amt > 10000000) errors.push("Amount seems unrealistically large.");
+  if (!fields.date) errors.push("Date is required.");
+  return errors;
+}
+
+function exportCSV(transactions) {
+  if (!transactions.length) return false;
+  const headers = ["Date", "Type", "Description", "Category", "Amount (₹)"];
+  const rows = transactions.map((t) => [
+    t.date, t.type, `"${t.desc.replace(/"/g, '""')}"`,
+    `"${t.category.replace(/"/g, '""')}"`, t.amount.toFixed(2),
+  ]);
+  const csv = [headers, ...rows].map((r) => r.join(",")).join("\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `expenses_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.style.display = "none"; document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+  return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CANVAS CHART DRAWING  (pure functions, called from useEffect)
+═══════════════════════════════════════════════════════════════ */
+const animRefs = { main: null, cat: null };
+
+function animateTo(id, fromPcts, toPcts, drawFn) {
+  if (animRefs[id]) cancelAnimationFrame(animRefs[id]);
+  const start = performance.now();
+  function frame(now) {
+    const t = Math.min(1, (now - start) / ANIM_MS);
+    const ease = 1 - Math.pow(1 - t, 3);
+    const current = fromPcts.map((f, i) => f + (toPcts[i] - f) * ease);
+    drawFn(current);
+    if (t < 1) animRefs[id] = requestAnimationFrame(frame);
+  }
+  animRefs[id] = requestAnimationFrame(frame);
+}
+
+function setupCanvas(canvas) {
+  const wrap = canvas.parentElement;
+  const dpr = window.devicePixelRatio || 1;
+  const w = wrap.clientWidth || 400, h = wrap.clientHeight || 220;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w + "px"; canvas.style.height = h + "px";
+  const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
+  return { ctx, W: w, H: h };
+}
+
+function getClr(dark) {
+  return {
+    grid: dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.07)",
+    tick: dark ? "#6b6b85" : "#8888a0",
+    bg:   dark ? "#1c1c28" : "#f0f0f8",
+    text: dark ? "#f0ede8" : "#1a1a2e",
+    empty:dark ? "#4a4a60" : "#b0b0c8",
+  };
+}
+
+function drawRoundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, h / 2, w / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function getLast6Months() {
+  const res = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i);
+    res.push({ label: d.toLocaleDateString("en-IN", { month: "short" }),
+      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` });
+  }
+  return res;
+}
+
+function drawMainChart(canvas, stats, mode, dark, prevRef) {
+  if (!canvas) return;
+  const { ctx, W, H } = setupCanvas(canvas);
+  const PAD = { top: 24, right: 20, bottom: 38, left: 60 };
+  const CW = W - PAD.left - PAD.right, CH = H - PAD.top - PAD.bottom;
+  const c = getClr(dark);
+  const months = getLast6Months();
+  const incData = months.map((m) => (stats.monthMap[m.key] || {}).income || 0);
+  const expData = months.map((m) => (stats.monthMap[m.key] || {}).expense || 0);
+  const maxVal = Math.max(...incData, ...expData, 1);
+  const allPcts = [...incData.map((v) => v / maxVal), ...expData.map((v) => v / maxVal)];
+  const prevAll = prevRef.current || allPcts.map(() => 0);
+  prevRef.current = allPcts;
+
+  function render(pcts) {
+    ctx.clearRect(0, 0, W, H);
+    const iP = pcts.slice(0, months.length), eP = pcts.slice(months.length);
+    ctx.strokeStyle = c.grid; ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = PAD.top + CH - (CH / 4 * i);
+      ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + CW, y); ctx.stroke();
+      const v = Math.round(maxVal / 4 * i);
+      ctx.fillStyle = c.tick; ctx.font = "10px DM Sans,sans-serif"; ctx.textAlign = "right";
+      ctx.fillText(v >= 1000 ? (v / 1000).toFixed(0) + "k" : v, PAD.left - 6, y + 4);
+    }
+    const step = CW / months.length;
+    if (mode === "line") {
+      [{ pcts: iP, color: "#4ecb71", fill: "rgba(78,203,113,0.10)" },
+       { pcts: eP, color: "#ff5e5e", fill: "rgba(255,94,94,0.08)" }].forEach(({ pcts: pp, color, fill }) => {
+        const pts = pp.map((p, i) => ({ x: PAD.left + step * i + step / 2, y: PAD.top + CH - p * CH }));
+        ctx.beginPath(); ctx.moveTo(pts[0].x, PAD.top + CH);
+        pts.forEach((p) => ctx.lineTo(p.x, p.y));
+        ctx.lineTo(pts[pts.length - 1].x, PAD.top + CH);
+        ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+        ctx.beginPath(); pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+        ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.lineJoin = "round"; ctx.stroke();
+        pts.forEach((p) => {
+          ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = color; ctx.fill();
+          ctx.strokeStyle = c.bg; ctx.lineWidth = 2; ctx.stroke();
+        });
+      });
+    } else {
+      const bw = step * 0.32, gap = step * 0.04;
+      iP.forEach((p, i) => { const x = PAD.left + step * i + gap, bh = Math.max(2, p * CH), y = PAD.top + CH - bh; drawRoundRect(ctx, x, y, bw, bh, 4); ctx.fillStyle = "rgba(78,203,113,0.82)"; ctx.fill(); });
+      eP.forEach((p, i) => { const x = PAD.left + step * i + bw + gap * 3, bh = Math.max(2, p * CH), y = PAD.top + CH - bh; drawRoundRect(ctx, x, y, bw, bh, 4); ctx.fillStyle = "rgba(255,94,94,0.82)"; ctx.fill(); });
+    }
+    ctx.fillStyle = c.tick; ctx.font = "11px DM Sans,sans-serif"; ctx.textAlign = "center";
+    months.forEach((m, i) => ctx.fillText(m.label, PAD.left + step * i + step / 2, PAD.top + CH + 18));
+    const lx = PAD.left;
+    [{ color: mode === "line" ? "#4ecb71" : "rgba(78,203,113,0.82)", label: "Income" },
+     { color: mode === "line" ? "#ff5e5e" : "rgba(255,94,94,0.82)", label: "Expense" }].forEach(({ color, label }, i) => {
+      const x = lx + i * 80; ctx.fillStyle = color; ctx.fillRect(x, H - 14, 10, 10);
+      ctx.fillStyle = c.tick; ctx.font = "10px DM Sans,sans-serif"; ctx.textAlign = "left";
+      ctx.fillText(label, x + 13, H - 5);
+    });
+  }
+  animateTo("main", prevAll, allPcts, render);
+}
+
+function drawCatChart(canvas, stats, mode, dark, prevRef) {
+  if (!canvas) return;
+  const { ctx, W, H } = setupCanvas(canvas);
+  const c = getClr(dark);
+  const cats = stats.catSorted;
+  if (!cats.length) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = c.empty; ctx.font = "13px DM Sans,sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("No expenses yet", W / 2, H / 2); return;
+  }
+  const vals = cats.map(([, v]) => v);
+  const total = vals.reduce((s, v) => s + v, 0);
+  const prevVals = prevRef.current || vals.map(() => 0);
+  prevRef.current = vals;
+
+  if (mode === "donut") {
+    const pcts = vals.map((v) => v / total);
+    const prevP = prevVals.map((v) => v / total);
+    animateTo("cat", prevP, pcts, (currentP) => {
+      ctx.clearRect(0, 0, W, H);
+      const cx = W * 0.4, cy = H / 2, outerR = Math.min(cx, cy) * 0.82, innerR = outerR * 0.56;
+      let angle = -Math.PI / 2;
+      currentP.forEach((p, i) => {
+        const slice = p * Math.PI * 2;
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, outerR, angle, angle + slice);
+        ctx.closePath(); ctx.fillStyle = PALETTE[i % PALETTE.length]; ctx.fill();
+        ctx.strokeStyle = c.bg; ctx.lineWidth = 2; ctx.stroke(); angle += slice;
+      });
+      ctx.beginPath(); ctx.arc(cx, cy, innerR, 0, Math.PI * 2); ctx.fillStyle = c.bg; ctx.fill();
+      ctx.fillStyle = c.text; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.font = "bold 12px DM Sans,sans-serif";
+      ctx.fillText("₹" + (total >= 1000 ? (total / 1000).toFixed(0) + "k" : Math.round(total)), cx, cy);
+      const maxLeg = Math.min(cats.length, 6), lx = W * 0.72, startY = H / 2 - (maxLeg * 18) / 2;
+      cats.slice(0, maxLeg).forEach(([cat], i) => {
+        const name = cat.split(" ").slice(1).join(" ") || cat;
+        ctx.fillStyle = PALETTE[i % PALETTE.length]; ctx.fillRect(lx, startY + i * 20, 10, 10);
+        ctx.fillStyle = c.tick; ctx.font = "10px DM Sans,sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+        ctx.fillText(name.length > 10 ? name.slice(0, 10) + "…" : name, lx + 13, startY + i * 20 + 9);
+      });
+    });
+  } else {
+    const topN = cats.slice(0, 7), maxVal = topN[0][1];
+    const prevN = prevVals.slice(0, topN.length), curN = topN.map(([, v]) => v);
+    const PAD = { top: 12, right: 60, bottom: 10, left: 10 };
+    const labelW = 88, barW = W - PAD.left - PAD.right - labelW;
+    const rowH = Math.floor((H - PAD.top - PAD.bottom) / topN.length);
+    animateTo("cat", prevN.map((v) => v / maxVal), curN.map((v) => v / maxVal), (pcts) => {
+      ctx.clearRect(0, 0, W, H);
+      pcts.forEach((p, i) => {
+        const y = PAD.top + i * rowH, name = topN[i][0].split(" ").slice(1).join(" ") || topN[i][0], val = topN[i][1];
+        ctx.fillStyle = c.tick; ctx.font = "10px DM Sans,sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+        ctx.fillText(name.length > 12 ? name.slice(0, 12) + "…" : name, PAD.left + labelW, y + rowH * 0.5);
+        const bh = rowH * 0.58, bx = PAD.left + labelW + 6, by = y + (rowH - bh) / 2, bwActual = Math.max(4, p * barW);
+        drawRoundRect(ctx, bx, by, bwActual, bh, 3); ctx.fillStyle = PALETTE[i % PALETTE.length]; ctx.fill();
+        const dv = val >= 1000 ? "₹" + (val / 1000).toFixed(0) + "k" : "₹" + Math.round(val);
+        ctx.fillStyle = c.text; ctx.font = "10px DM Sans,sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+        ctx.fillText(dv, bx + bwActual + 6, y + rowH * 0.5);
+      });
+    });
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GLOBAL CSS  (injected once into <head>)
+═══════════════════════════════════════════════════════════════ */
+const GLOBAL_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Sans:wght@300;400;500;600&display=swap');
+:root{--bg:#0a0a0f;--surface:#13131a;--surface2:#1c1c28;--surface3:#242436;--border:#2a2a3d;--accent:#f5c842;--accent-h:#ffd95a;--text:#f0ede8;--text-sub:#b0adb8;--muted:#6b6b85;--success:#4ecb71;--danger:#ff5e5e;--warn:#ff9f43;--info:#5b8fff;--shadow:rgba(0,0,0,0.5);--shadow-sm:rgba(0,0,0,0.3);}
+[data-theme="light"]{--bg:#f0eff8;--surface:#ffffff;--surface2:#f5f4fc;--surface3:#ebebf8;--border:#dcdce8;--accent:#e8a800;--accent-h:#f5c000;--text:#1a1a2e;--text-sub:#4a4a6a;--muted:#8888a8;--success:#2ea84f;--danger:#e83030;--warn:#d97706;--info:#3b6fdf;--shadow:rgba(0,0,0,0.12);--shadow-sm:rgba(0,0,0,0.07);}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+html{scroll-behavior:smooth;}
+body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min-height:100vh;overflow-x:hidden;transition:background .3s,color .3s;}
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(ellipse 700px 450px at 85% 5%,rgba(245,200,66,.05) 0%,transparent 65%),radial-gradient(ellipse 500px 350px at 5% 90%,rgba(91,143,255,.05) 0%,transparent 65%),radial-gradient(ellipse 300px 300px at 50% 50%,rgba(78,203,113,.02) 0%,transparent 70%);transition:opacity .3s;}
+[data-theme="light"] body::before{opacity:.6;}
+.et-container{max-width:1240px;margin:0 auto;padding:36px 24px 60px;position:relative;z-index:1;}
+.et-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:36px;animation:fadeUp .55s ease both;}
+.et-header-left{display:flex;align-items:flex-end;gap:20px;}
+.et-logo{font-family:'Playfair Display',serif;font-size:2.2rem;font-weight:900;letter-spacing:-1px;line-height:1;}
+.et-logo span{color:var(--accent);}
+.et-date-badge{background:var(--surface);border:1px solid var(--border);border-radius:100px;padding:7px 16px;font-size:.78rem;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;white-space:nowrap;}
+.et-header-actions{display:flex;gap:8px;}
+.et-hbtn{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 14px;color:var(--text-sub);font-size:12px;transition:all .2s;cursor:pointer;font-family:'DM Sans',sans-serif;}
+.et-hbtn:hover{border-color:var(--accent);color:var(--accent);}
+.et-icon-btn{width:38px;height:38px;background:var(--surface);border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center;transition:all .2s;color:var(--text);}
+.et-icon-btn:hover{border-color:var(--accent);transform:translateY(-1px);}
+.et-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:28px;animation:fadeUp .55s .08s ease both;}
+.et-card{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:26px;position:relative;overflow:hidden;transition:transform .2s,border-color .2s,box-shadow .2s;}
+.et-card:hover{transform:translateY(-3px);border-color:var(--accent);box-shadow:0 10px 30px var(--shadow-sm);}
+.et-card::after{content:'';position:absolute;top:0;right:0;width:90px;height:90px;border-radius:50%;opacity:.07;transform:translate(24px,-24px);}
+.et-card.bal::after{background:var(--accent);}.et-card.inc::after{background:var(--success);}.et-card.exp::after{background:var(--danger);}
+.et-card-label{font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:11px;}
+.et-card-amount{font-family:'Playfair Display',serif;font-size:1.9rem;font-weight:700;line-height:1;transition:color .3s;}
+.et-card.bal .et-card-amount{color:var(--accent);}.et-card.inc .et-card-amount{color:var(--success);}.et-card.exp .et-card-amount{color:var(--danger);}
+.et-card-icon{position:absolute;top:22px;right:22px;font-size:1.3rem;opacity:.55;}
+.et-alert{border-radius:14px;padding:15px 20px;display:flex;align-items:center;gap:14px;margin-bottom:22px;animation:slideDown .3s ease both;}
+.et-alert.warning{background:rgba(255,159,67,.1);border:1px solid rgba(255,159,67,.35);}
+.et-alert.exceeded{background:rgba(255,94,94,.1);border:1px solid rgba(255,94,94,.45);}
+.et-alert-icon{font-size:1.5rem;flex-shrink:0;}
+.et-alert-txt{flex:1;}
+.et-alert-title{font-weight:700;font-size:.92rem;margin-bottom:2px;}
+.et-alert.warning .et-alert-title{color:var(--warn);}.et-alert.exceeded .et-alert-title{color:var(--danger);}
+.et-alert-sub{font-size:.8rem;color:var(--muted);}
+.et-alert-x{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:1.1rem;line-height:1;padding:4px 8px;border-radius:8px;transition:color .2s;}
+.et-alert-x:hover{color:var(--danger);}
+.et-main-grid{display:grid;grid-template-columns:360px 1fr;gap:22px;align-items:start;}
+.et-panel{background:var(--surface);border:1px solid var(--border);border-radius:22px;padding:26px;animation:fadeUp .55s .16s ease both;position:sticky;top:20px;}
+.et-panel-title{font-family:'Playfair Display',serif;font-size:1.2rem;font-weight:700;margin-bottom:20px;}
+.et-type-toggle{display:grid;grid-template-columns:1fr 1fr;background:var(--surface2);border-radius:12px;padding:4px;margin-bottom:20px;}
+.et-type-btn{padding:9px;border:none;background:transparent;color:var(--muted);border-radius:9px;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:.88rem;font-weight:500;transition:all .2s;}
+.et-type-btn.active{background:var(--surface);color:var(--text);box-shadow:0 2px 8px var(--shadow-sm);}
+.et-type-btn.active.income{color:var(--success);}.et-type-btn.active.expense{color:var(--danger);}
+.et-blocked-msg{background:rgba(255,94,94,.12);border:1px solid rgba(255,94,94,.4);border-radius:12px;padding:13px 16px;margin-bottom:14px;text-align:center;color:var(--danger);font-size:.88rem;font-weight:600;}
+.et-form-group{margin-bottom:15px;}
+.et-label{display:block;font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:7px;}
+.et-input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:12px 14px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:.92rem;outline:none;transition:border-color .2s,box-shadow .2s;-webkit-appearance:none;appearance:none;}
+.et-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(245,200,66,.12);}
+.et-input::placeholder{color:var(--muted);}
+.et-input option{background:var(--surface2);color:var(--text);}
+.et-amount-wrap{position:relative;}
+.et-currency{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none;}
+.et-amount-wrap .et-input{padding-left:26px;}
+.et-inputs-locked .et-input{opacity:.35;pointer-events:none;}
+.et-submit-btn{width:100%;padding:14px;background:var(--accent);color:#0a0a0f;border:none;border-radius:13px;font-family:'DM Sans',sans-serif;font-size:.96rem;font-weight:700;cursor:pointer;margin-top:4px;transition:all .2s;letter-spacing:.02em;}
+.et-submit-btn:hover:not(:disabled){background:var(--accent-h);transform:translateY(-1px);box-shadow:0 8px 22px rgba(245,200,66,.28);}
+.et-submit-btn:disabled{background:var(--surface3);color:var(--muted);cursor:not-allowed;}
+.et-cancel-btn{width:100%;padding:10px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:13px;font-family:'DM Sans',sans-serif;font-size:.88rem;cursor:pointer;margin-top:8px;transition:all .2s;}
+.et-cancel-btn:hover{border-color:var(--danger);color:var(--danger);}
+.et-divider{border:none;border-top:1px solid var(--border);margin:18px 0;}
+.et-budget-section-title{font-size:.9rem;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:6px;color:var(--text-sub);}
+.et-limit-row{display:flex;gap:8px;align-items:flex-end;}
+.et-limit-row .et-form-group{flex:1;margin-bottom:0;}
+.et-set-limit-btn{padding:12px 14px;background:var(--surface2);color:var(--accent);border:1px solid var(--accent);border-radius:11px;font-family:'DM Sans',sans-serif;font-size:.82rem;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap;flex-shrink:0;}
+.et-set-limit-btn:hover{background:rgba(245,200,66,.1);}
+.et-clear-limit-btn{padding:5px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:9px;font-family:'DM Sans',sans-serif;font-size:.76rem;cursor:pointer;transition:all .2s;margin-top:8px;}
+.et-clear-limit-btn:hover{border-color:var(--danger);color:var(--danger);}
+.et-limit-status-row{display:flex;justify-content:space-between;align-items:center;font-size:.8rem;color:var(--muted);margin-top:12px;}
+.et-limit-bar-wrap{height:6px;background:var(--surface2);border-radius:100px;overflow:hidden;margin-top:8px;}
+.et-limit-bar-fill{height:100%;border-radius:100px;transition:width .5s cubic-bezier(.4,0,.2,1),background .3s;}
+.et-limit-remaining{margin-top:5px;font-size:.76rem;color:var(--muted);text-align:right;}
+.et-right-panel{display:flex;flex-direction:column;gap:20px;animation:fadeUp .55s .24s ease both;}
+.et-chart-panel{background:var(--surface);border:1px solid var(--border);border-radius:22px;padding:26px;}
+.et-chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px;}
+.et-chart-title{font-family:'Playfair Display',serif;font-size:1.15rem;font-weight:700;}
+.et-chart-tabs{display:flex;gap:6px;}
+.et-chart-tab{padding:5px 13px;border-radius:100px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:.76rem;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .2s;}
+.et-chart-tab.active,.et-chart-tab:hover{background:var(--accent);color:#0a0a0f;border-color:var(--accent);}
+.et-charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
+.et-chart-box-title{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:10px;}
+.et-chart-wrap{position:relative;width:100%;height:220px;background:var(--surface2);border-radius:10px;overflow:hidden;}
+.et-chart-wrap canvas{display:block;}
+.et-budget-bar{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 20px;}
+.et-budget-header{display:flex;justify-content:space-between;font-size:.78rem;color:var(--muted);margin-bottom:9px;text-transform:uppercase;letter-spacing:.06em;}
+.et-progress-track{height:6px;background:var(--surface2);border-radius:100px;overflow:hidden;}
+.et-progress-fill{height:100%;border-radius:100px;background:linear-gradient(90deg,var(--success),var(--accent));transition:width .5s cubic-bezier(.4,0,.2,1);}
+.et-filters-bar{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px 18px;margin-bottom:16px;}
+.et-filters-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+.et-filters-row+.et-filters-row{margin-top:10px;}
+.et-search-wrap{position:relative;flex:1;min-width:160px;}
+.et-search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none;font-size:.9rem;}
+.et-search-wrap .et-input{padding-left:32px;}
+.et-chip-group{display:flex;gap:6px;flex-wrap:wrap;}
+.et-chip{padding:5px 13px;border-radius:100px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:.78rem;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .2s;white-space:nowrap;}
+.et-chip.active,.et-chip:hover{background:var(--accent);color:#0a0a0f;border-color:var(--accent);}
+.et-custom-range{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+.et-custom-range .et-input{width:auto;flex:1;min-width:130px;}
+.et-apply-btn{padding:8px 16px;background:var(--info);color:#fff;border:none;border-radius:9px;font-family:'DM Sans',sans-serif;font-size:.82rem;font-weight:600;cursor:pointer;transition:all .2s;}
+.et-apply-btn:hover{opacity:.85;}
+.et-sort-select{padding:6px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:9px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:.8rem;cursor:pointer;outline:none;-webkit-appearance:none;appearance:none;}
+.et-sort-dir-btn{width:32px;height:32px;background:var(--surface2);border:1px solid var(--border);border-radius:9px;color:var(--muted);font-size:.9rem;cursor:pointer;transition:all .2s;}
+.et-sort-dir-btn:hover{border-color:var(--accent);color:var(--accent);}
+.et-list-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+.et-list-title{font-family:'Playfair Display',serif;font-size:1.15rem;font-weight:700;}
+.et-transactions{display:flex;flex-direction:column;gap:8px;}
+.et-tx{background:var(--surface2);border:1px solid var(--border);border-radius:13px;padding:14px 16px;display:flex;align-items:center;gap:12px;transition:transform .18s,background .18s;animation:slideIn .3s ease both;position:relative;overflow:hidden;}
+.et-tx:hover{transform:translateX(4px);background:var(--surface3);}
+.et-tx::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:0 2px 2px 0;}
+.et-tx.income-tx::before{background:var(--success);}.et-tx.expense-tx::before{background:var(--danger);}
+.et-tx-icon{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:1.05rem;flex-shrink:0;}
+.income-tx .et-tx-icon{background:rgba(78,203,113,.12);}.expense-tx .et-tx-icon{background:rgba(255,94,94,.12);}
+.et-tx-info{flex:1;min-width:0;}
+.et-tx-desc{font-weight:500;font-size:.88rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.et-tx-meta{font-size:.72rem;color:var(--muted);margin-top:3px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.et-tx-cat{background:var(--surface);padding:2px 7px;border-radius:100px;}
+.et-tx-right{text-align:right;flex-shrink:0;}
+.et-tx-amount{font-family:'Playfair Display',serif;font-size:.96rem;font-weight:700;}
+.income-tx .et-tx-amount{color:var(--success);}.expense-tx .et-tx-amount{color:var(--danger);}
+.et-tx-balance{font-size:.7rem;color:var(--muted);margin-top:2px;}
+.et-tx-balance.pos{color:var(--success);}.et-tx-balance.neg{color:var(--danger);}
+.et-tx-actions{display:flex;gap:4px;opacity:0;transition:opacity .2s;flex-shrink:0;}
+.et-tx:hover .et-tx-actions{opacity:1;}
+.et-tx-btn{width:30px;height:30px;border-radius:8px;background:transparent;border:1px solid var(--border);cursor:pointer;font-size:.82rem;display:flex;align-items:center;justify-content:center;transition:all .18s;color:var(--muted);}
+.et-tx-btn.edit:hover{border-color:var(--info);color:var(--info);background:rgba(91,143,255,.1);}
+.et-tx-btn.del:hover{border-color:var(--danger);color:var(--danger);background:rgba(255,94,94,.1);}
+.et-empty{text-align:center;padding:48px 20px;color:var(--muted);}
+.et-empty-icon{font-size:2.4rem;margin-bottom:10px;opacity:.4;}
+.et-empty-label{font-weight:600;font-size:.95rem;margin-bottom:4px;color:var(--text-sub);}
+.et-empty-sub{font-size:.82rem;}
+.et-toast{position:fixed;bottom:28px;right:28px;background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:13px 18px;font-size:.88rem;max-width:360px;box-shadow:0 16px 48px var(--shadow);transform:translateY(120px);opacity:0;transition:all .35s cubic-bezier(.34,1.56,.64,1);z-index:500;color:var(--text);}
+.et-toast.show{transform:translateY(0);opacity:1;}
+.et-toast.success{border-left:3px solid var(--success);}.et-toast.remove{border-left:3px solid var(--danger);}.et-toast.warning{border-left:3px solid var(--warn);}
+.et-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;z-index:600;opacity:0;pointer-events:none;transition:opacity .3s;}
+.et-modal-overlay.show{opacity:1;pointer-events:all;}
+.et-modal{background:var(--surface);border:1px solid var(--border);border-radius:22px;padding:38px 32px;max-width:460px;width:92%;transform:scale(.88) translateY(16px);transition:transform .35s cubic-bezier(.34,1.56,.64,1);}
+.et-modal-overlay.show .et-modal{transform:scale(1) translateY(0);}
+.et-modal-icon{font-size:3.2rem;margin-bottom:14px;display:block;animation:bounce .6s ease infinite alternate;}
+.et-modal-title{font-family:'Playfair Display',serif;font-size:1.55rem;font-weight:900;color:var(--danger);margin-bottom:10px;}
+.et-modal-body{color:var(--muted);line-height:1.7;font-size:.92rem;margin-bottom:24px;}
+.et-modal-body strong{color:var(--text);}
+.et-modal-actions{display:flex;gap:10px;justify-content:flex-end;}
+.et-modal-btn{background:var(--danger);color:#fff;border:none;padding:12px 24px;border-radius:11px;font-family:'DM Sans',sans-serif;font-size:.92rem;font-weight:700;cursor:pointer;transition:all .2s;}
+.et-modal-btn:hover{background:#ff7a7a;transform:translateY(-1px);}
+.et-modal-btn-sec{background:transparent;color:var(--muted);border:1px solid var(--border);padding:12px 24px;border-radius:11px;font-family:'DM Sans',sans-serif;font-size:.92rem;cursor:pointer;transition:all .2s;}
+.et-modal-btn-sec:hover{border-color:var(--accent);color:var(--accent);}
+@keyframes fadeUp{from{opacity:0;transform:translateY(18px);}to{opacity:1;transform:translateY(0);}}
+@keyframes slideIn{from{opacity:0;transform:translateX(-8px);}to{opacity:1;transform:translateX(0);}}
+@keyframes slideDown{from{opacity:0;transform:translateY(-8px);}to{opacity:1;transform:translateY(0);}}
+@keyframes bounce{from{transform:translateY(0);}to{transform:translateY(-8px);}}
+@media(max-width:960px){.et-main-grid{grid-template-columns:1fr;}.et-charts-grid{grid-template-columns:1fr;}.et-panel{position:static;}}
+@media(max-width:640px){.et-summary{grid-template-columns:1fr;}.et-header{flex-wrap:wrap;gap:12px;}.et-header-left{flex-direction:column;align-items:flex-start;gap:8px;}}
+`;
+
+/* ═══════════════════════════════════════════════════════════════
+   TOAST  (singleton outside React tree)
+═══════════════════════════════════════════════════════════════ */
+let _toastTimer = null;
+function fireToast(msg, type = "success") {
+  const el = document.getElementById("et-toast");
+  if (!el) return;
+  el.innerHTML = msg; el.className = `et-toast ${type} show`;
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove("show"), 3500);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   MODAL COMPONENT
+═══════════════════════════════════════════════════════════════ */
+function Modal({ modal, onClose }) {
+  if (!modal) return null;
+  return (
+    <div className={`et-modal-overlay${modal.open ? " show" : ""}`}>
+      <div className="et-modal">
+        {modal.icon && <span className="et-modal-icon">{modal.icon}</span>}
+        <div className="et-modal-title">{modal.title}</div>
+        <div className="et-modal-body" dangerouslySetInnerHTML={{ __html: modal.body }} />
+        <div className="et-modal-actions">
+          {modal.buttons.map((b, i) => (
+            <button key={i} className={b.primary ? "et-modal-btn" : "et-modal-btn-sec"}
+              onClick={() => { onClose(); b.action && b.action(); }}>{b.label}</button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CHART PANEL COMPONENT
+═══════════════════════════════════════════════════════════════ */
+function ChartPanel({ stats, chartMode, setChartMode, theme }) {
+  const mainRef = useRef(null);
+  const catRef  = useRef(null);
+  const prevMainRef = useRef(null);
+  const prevCatRef  = useRef(null);
+  const dark = theme === "dark";
+
+  const redraw = useCallback(() => {
+    if (mainRef.current) drawMainChart(mainRef.current, stats, chartMode, dark, prevMainRef);
+    if (catRef.current)  drawCatChart(catRef.current, stats, chartMode, dark, prevCatRef);
+  }, [stats, chartMode, dark]);
+
+  useEffect(() => { redraw(); }, [redraw]);
+
+  useEffect(() => {
+    let t = null;
+    const handler = () => { clearTimeout(t); t = setTimeout(redraw, 180); };
+    window.addEventListener("resize", handler);
+    return () => { window.removeEventListener("resize", handler); clearTimeout(t); };
+  }, [redraw]);
+
+  const mainLabel = chartMode === "line" ? "Income & Expense Trend" : "Monthly Income vs Expenses";
+
+  return (
+    <div className="et-chart-panel">
+      <div className="et-chart-header">
+        <div className="et-chart-title">Analytics</div>
+        <div className="et-chart-tabs">
+          {[["bar","Monthly"],["line","Trend"],["donut","Category"]].map(([m, label]) => (
+            <button key={m} className={`et-chart-tab${chartMode === m ? " active" : ""}`}
+              onClick={() => { prevMainRef.current = null; prevCatRef.current = null; setChartMode(m); }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="et-charts-grid">
+        <div>
+          <div className="et-chart-box-title">{mainLabel}</div>
+          <div className="et-chart-wrap"><canvas ref={mainRef} /></div>
+        </div>
+        <div>
+          <div className="et-chart-box-title">Expense by Category</div>
+          <div className="et-chart-wrap"><canvas ref={catRef} /></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TRANSACTION FORM COMPONENT
+═══════════════════════════════════════════════════════════════ */
+function TransactionForm({ editingTx, currentType, setCurrentType, isBlocked, monthlyLimit, limitInput, setLimitInput, budgetStatus, onSubmit, onCancelEdit, onSetLimit, onClearLimit }) {
+  const [desc, setDesc]     = useState("");
+  const [amount, setAmount] = useState("");
+  const [category, setCat]  = useState("");
+  const [date, setDate]     = useState(todayStr());
+  const descRef = useRef(null);
+
+  const cats = currentType === "income" ? INCOME_CATS : EXPENSE_CATS;
+
+  // When editing tx changes, pre-fill form
+  useEffect(() => {
+    if (editingTx) {
+      setDesc(editingTx.desc);
+      setAmount(String(editingTx.amount));
+      setDate(editingTx.date);
+      // category set after type switch (cats list changes)
+      setTimeout(() => setCat(editingTx.category), 0);
+    }
+  }, [editingTx]);
+
+  // Reset category when type changes
+  useEffect(() => {
+    if (!editingTx) setCat(cats[0] || "");
+  }, [currentType]);
+
+  // Default category on mount / cats change
+  useEffect(() => {
+    if (!editingTx && !cats.includes(category)) setCat(cats[0] || "");
+  }, [cats]);
+
+  // Autofocus desc
+  useEffect(() => { descRef.current?.focus(); }, []);
+
+  function reset() {
+    setDesc(""); setAmount(""); setDate(todayStr());
+    setTimeout(() => descRef.current?.focus(), 0);
+  }
+
+  function handleSubmit() {
+    const result = onSubmit({ type: currentType, desc, amount, category, date });
+    if (result?.success) reset();
+  }
+
+  function handleKeyDown(e, next) {
+    if (e.key === "Enter") { e.preventDefault(); next ? next.focus() : handleSubmit(); }
+  }
+
+  const amountRef = useRef(null), catRef = useRef(null), dateRef = useRef(null);
+  const blockedAndExpense = isBlocked && currentType === "expense";
+
+  return (
+    <div className="et-panel" id="formPanel">
+      <div className="et-panel-title">{editingTx ? "Edit Transaction" : "Add Transaction"}</div>
+
+      <div className="et-type-toggle">
+        <button className={`et-type-btn income${currentType === "income" ? " active" : ""}`}
+          onClick={() => { if (!editingTx) setCurrentType("income"); }}>↑ Income</button>
+        <button className={`et-type-btn expense${currentType === "expense" ? " active" : ""}`}
+          onClick={() => { if (!editingTx) setCurrentType("expense"); }}>↓ Expense</button>
+      </div>
+
+      {blockedAndExpense && (
+        <div className="et-blocked-msg">🔒 Monthly limit reached — no more expenses can be added!</div>
+      )}
+
+      <div className={blockedAndExpense ? "et-inputs-locked" : ""}>
+        <div className="et-form-group">
+          <label className="et-label">Description</label>
+          <input ref={descRef} className="et-input" type="text" placeholder="What was it for?"
+            value={desc} onChange={(e) => setDesc(e.target.value)}
+            onKeyDown={(e) => handleKeyDown(e, amountRef.current)} autoComplete="off" />
+        </div>
+        <div className="et-form-group">
+          <label className="et-label">Amount</label>
+          <div className="et-amount-wrap">
+            <span className="et-currency">₹</span>
+            <input ref={amountRef} className="et-input" type="number" placeholder="0.00"
+              min="0.01" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)}
+              onKeyDown={(e) => handleKeyDown(e, catRef.current)} />
+          </div>
+        </div>
+        <div className="et-form-group">
+          <label className="et-label">Category</label>
+          <select ref={catRef} className="et-input" value={category}
+            onChange={(e) => setCat(e.target.value)}
+            onKeyDown={(e) => handleKeyDown(e, dateRef.current)}>
+            {cats.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div className="et-form-group">
+          <label className="et-label">Date</label>
+          <input ref={dateRef} className="et-input" type="date" value={date}
+            onChange={(e) => setDate(e.target.value)}
+            onKeyDown={(e) => handleKeyDown(e, null)} />
+        </div>
+      </div>
+
+      <button className="et-submit-btn" disabled={blockedAndExpense} onClick={handleSubmit}>
+        {editingTx ? "✏️ Update Transaction" : "+ Add Transaction"}
+      </button>
+      {editingTx && (
+        <button className="et-cancel-btn" onClick={() => { onCancelEdit(); reset(); }}>✕ Cancel Edit</button>
+      )}
+
+      <hr className="et-divider" />
+
+      <div className="et-budget-section-title">🎯 Monthly Budget Limit</div>
+      <div className="et-limit-row">
+        <div className="et-form-group">
+          <label className="et-label">Set Limit (₹)</label>
+          <div className="et-amount-wrap">
+            <span className="et-currency">₹</span>
+            <input className="et-input" type="number" placeholder="e.g. 20000" min="1"
+              value={limitInput} onChange={(e) => setLimitInput(e.target.value)} />
+          </div>
+        </div>
+        <button className="et-set-limit-btn" onClick={onSetLimit}>Set</button>
+      </div>
+
+      {budgetStatus.active && (
+        <div>
+          <div className="et-limit-status-row">
+            <span>Used {fmt(budgetStatus.used)} of {fmt(budgetStatus.limit)}</span>
+            <span style={{ fontWeight: 600 }}>{budgetStatus.pct.toFixed(1)}%</span>
+          </div>
+          <div className="et-limit-bar-wrap">
+            <div className="et-limit-bar-fill"
+              style={{ width: budgetStatus.pct + "%", background: budgetStatus.barColor }} />
+          </div>
+          <div className="et-limit-remaining">
+            {budgetStatus.remaining >= 0
+              ? `₹${n2(budgetStatus.remaining)} remaining`
+              : `₹${n2(Math.abs(budgetStatus.remaining))} over limit`}
+          </div>
+          <button className="et-clear-limit-btn" onClick={onClearLimit}>✕ Remove limit</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TRANSACTION LIST COMPONENT
+═══════════════════════════════════════════════════════════════ */
+function TransactionList({ filtered, runningBalances, onEdit, onDelete }) {
+  if (!filtered.length) return (
+    <div className="et-empty">
+      <div className="et-empty-icon">🪙</div>
+      <div className="et-empty-label">Nothing to show</div>
+      <div className="et-empty-sub">Try adjusting filters or add a transaction above.</div>
+    </div>
+  );
+  return (
+    <div className="et-transactions">
+      {filtered.map((t, idx) => {
+        const icon = t.category.split(" ")[0];
+        const sign = t.type === "income" ? "+" : "-";
+        const d = parseDate(t.date).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+        const bal = runningBalances[t.id] ?? 0;
+        const balClass = bal >= 0 ? "pos" : "neg";
+        return (
+          <div key={t.id} className={`et-tx ${t.type}-tx`}
+            style={{ animationDelay: `${Math.min(idx, 10) * 30}ms` }}>
+            <div className="et-tx-icon">{icon}</div>
+            <div className="et-tx-info">
+              <div className="et-tx-desc">{t.desc}</div>
+              <div className="et-tx-meta">
+                <span>{d}</span>
+                <span className="et-tx-cat">{t.category}</span>
+              </div>
+            </div>
+            <div className="et-tx-right">
+              <div className="et-tx-amount">{sign}{fmt(t.amount)}</div>
+              <div className={`et-tx-balance ${balClass}`}>bal: {fmt(bal)}</div>
+            </div>
+            <div className="et-tx-actions">
+              <button className="et-tx-btn edit" onClick={() => onEdit(t.id)} title="Edit">✏️</button>
+              <button className="et-tx-btn del"  onClick={() => onDelete(t.id)} title="Delete">🗑</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   FILTERS BAR COMPONENT
+═══════════════════════════════════════════════════════════════ */
+function FiltersBar({ filter, setFilter }) {
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo]     = useState("");
+  const [searchVal, setSearchVal] = useState("");
+  const searchTimer = useRef(null);
+
+  function onSearchChange(v) {
+    setSearchVal(v);
+    clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => setFilter((f) => ({ ...f, search: v })), 250);
+  }
+
+  function applyCustomDate() {
+    if (!dateFrom || !dateTo) { fireToast("⚠️ Select both start and end dates.", "warning"); return; }
+    if (dateFrom > dateTo)    { fireToast("⚠️ Start date must be before end date.", "warning"); return; }
+    setFilter((f) => ({ ...f, dateFrom, dateTo }));
+  }
+
+  return (
+    <div className="et-filters-bar">
+      <div className="et-filters-row">
+        <div className="et-search-wrap">
+          <span className="et-search-icon">🔍</span>
+          <input className="et-input" type="text" placeholder="Search transactions…"
+            value={searchVal} onChange={(e) => onSearchChange(e.target.value)} />
+        </div>
+        <select className="et-sort-select" value={filter.sortBy}
+          onChange={(e) => setFilter((f) => ({ ...f, sortBy: e.target.value }))}>
+          <option value="date">Sort: Date</option>
+          <option value="amount">Sort: Amount</option>
+          <option value="category">Sort: Category</option>
+        </select>
+        <button className="et-sort-dir-btn"
+          onClick={() => setFilter((f) => ({ ...f, sortDir: f.sortDir === "asc" ? "desc" : "asc" }))}>
+          {filter.sortDir === "asc" ? "↑" : "↓"}
+        </button>
+      </div>
+
+      <div className="et-filters-row" style={{ marginTop: 10 }}>
+        <div className="et-chip-group">
+          {["all","income","expense"].map((v) => (
+            <button key={v} className={`et-chip${filter.type === v ? " active" : ""}`}
+              onClick={() => setFilter((f) => ({ ...f, type: v }))}>
+              {v === "all" ? "All" : v === "income" ? "Income" : "Expenses"}
+            </button>
+          ))}
+        </div>
+        <div className="et-chip-group" style={{ marginLeft: "auto" }}>
+          {[["all","All time"],["month","This month"],["3months","Last 3 months"],["year","This year"],["custom","Custom"]].map(([v, label]) => (
+            <button key={v} className={`et-chip${filter.period === v ? " active" : ""}`}
+              onClick={() => setFilter((f) => ({ ...f, period: v }))}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {filter.period === "custom" && (
+        <div className="et-filters-row et-custom-range" style={{ marginTop: 10 }}>
+          <label className="et-label" style={{ margin: 0, whiteSpace: "nowrap" }}>From</label>
+          <input className="et-input" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+          <label className="et-label" style={{ margin: 0, whiteSpace: "nowrap" }}>To</label>
+          <input className="et-input" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+          <button className="et-apply-btn" onClick={applyCustomDate}>Apply</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ROOT APP COMPONENT
+═══════════════════════════════════════════════════════════════ */
+export default function ExpenseTracker() {
+  // ── Persisted state ──────────────────────────────────
+  const [transactions, setTransactions] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.transactions) || "[]"); } catch { return []; }
+  });
+  const [monthlyLimit, setMonthlyLimit] = useState(() =>
+    parseFloat(localStorage.getItem(STORAGE_KEYS.limit) || "0") || 0
+  );
+  const [theme, setTheme] = useState(() => localStorage.getItem(STORAGE_KEYS.theme) || "dark");
+
+  // ── UI state ─────────────────────────────────────────
+  const [currentType, setCurrentType] = useState("income");
+  const [editingId, setEditingId]     = useState(null);
+  const [chartMode, setChartMode]     = useState("bar");
+  const [limitInput, setLimitInput]   = useState(monthlyLimit > 0 ? String(monthlyLimit) : "");
+  const [alertDismissed, setAlertDismissed] = useState(false);
+  const [modal, setModal]             = useState(null);
+  const [filter, setFilter]           = useState({
+    type: "all", period: "all", dateFrom: "", dateTo: "", search: "", sortBy: "date", sortDir: "desc"
+  });
+
+  // Budget modal fire tracking
+  const modalShownRef  = useRef(false);
+  const lastExceedRef  = useRef(0);
+
+  // ── Persist transactions ──────────────────────────────
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.transactions, JSON.stringify(transactions));
+  }, [transactions]);
+
+  // ── Persist theme ─────────────────────────────────────
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.theme, theme);
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  // ── Persist limit ─────────────────────────────────────
+  useEffect(() => {
+    if (monthlyLimit > 0) localStorage.setItem(STORAGE_KEYS.limit, String(monthlyLimit));
+    else localStorage.removeItem(STORAGE_KEYS.limit);
+  }, [monthlyLimit]);
+
+  // ── Inject global CSS once ────────────────────────────
+  useEffect(() => {
+    if (document.getElementById("et-global-css")) return;
+    const el = document.createElement("style"); el.id = "et-global-css"; el.textContent = GLOBAL_CSS;
+    document.head.appendChild(el);
+  }, []);
+
+  // ── Derived stats (memoized) ──────────────────────────
+  const stats = useMemo(() => computeStats(transactions), [transactions]);
+
+  const budgetStatus = useMemo(() => {
+    if (!monthlyLimit) return { active: false };
+    const used = stats.monthExpense;
+    const pct  = Math.min(100, (used / monthlyLimit) * 100);
+    const remaining = monthlyLimit - used;
+    const exceeded  = used > monthlyLimit;
+    const warning   = !exceeded && pct >= 80;
+    return {
+      active: true, limit: monthlyLimit, used, pct, remaining, exceeded, warning,
+      barColor: exceeded ? "var(--danger)" : warning ? "var(--warn)" : "var(--success)",
+    };
+  }, [stats, monthlyLimit]);
+
+  // Fire modal once when limit is exceeded
+  useEffect(() => {
+    if (!budgetStatus.active) { modalShownRef.current = false; lastExceedRef.current = 0; return; }
+    if (budgetStatus.exceeded) {
+      if (!modalShownRef.current && budgetStatus.used > lastExceedRef.current) {
+        modalShownRef.current = true; lastExceedRef.current = budgetStatus.used;
+        setAlertDismissed(false);
+        setTimeout(() => setModal({
+          open: true, icon: "🚨", title: "Budget Exceeded!",
+          body: `<p>This month you've spent <strong>${fmt(budgetStatus.used)}</strong>, which is <span style="color:var(--danger);font-weight:700;">${fmt(budgetStatus.used - monthlyLimit)} over</span> your <strong>${fmt(monthlyLimit)}</strong> monthly limit.</p><p style="margin-top:10px;color:var(--muted);">No new expenses can be added until next month or you raise your limit.</p>`,
+          buttons: [{ label: "Got it!", primary: true }],
+        }), 350);
+      }
+    } else { modalShownRef.current = false; lastExceedRef.current = 0; }
+  }, [budgetStatus.exceeded, budgetStatus.used]);
+
+  const isExpenseBlocked = monthlyLimit > 0 && stats.monthExpense >= monthlyLimit;
+
+  const filtered      = useMemo(() => getFiltered(transactions, filter), [transactions, filter]);
+  const runningBal    = useMemo(() => getRunningBalances(filtered), [filtered]);
+  const editingTx     = editingId ? transactions.find((t) => t.id === editingId) || null : null;
+
+  // ── Global keyboard shortcuts ─────────────────────────
+  useEffect(() => {
+    function handler(e) {
+      if (e.key === "Escape") { setModal(null); setEditingId(null); }
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") document.getElementById("et-submit-trigger")?.click();
+    }
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  // ── Transaction handlers ──────────────────────────────
+  function handleSubmit(fields) {
+    const errors = validateTx(fields);
+    if (errors.length) { fireToast("⚠️ " + errors[0], "warning"); return { success: false }; }
+
+    const amt = parseFloat(fields.amount);
+    if (editingId) {
+      // Budget check for edit: subtract original
+      if (fields.type === "expense" && monthlyLimit) {
+        const orig    = transactions.find((t) => t.id === editingId);
+        const origAmt = orig?.type === "expense" ? orig.amount : 0;
+        const adjUsed = stats.monthExpense - origAmt;
+        if (adjUsed + amt > monthlyLimit) {
+          const rem = monthlyLimit - adjUsed;
+          fireToast(`🔒 Only ₹${n2(Math.max(0,rem))} budget left — this expense is ₹${n2(amt)}.`, "warning");
+          return { success: false };
+        }
+      }
+      setTransactions((prev) => prev.map((t) => t.id === editingId
+        ? { ...t, ...fields, amount: amt, id: editingId } : t));
+      setEditingId(null);
+      modalShownRef.current = false;
+      fireToast("✅ Transaction updated!", "success");
+      return { success: true };
+    }
+
+    // Add
+    if (fields.type === "expense" && monthlyLimit) {
+      if (stats.monthExpense >= monthlyLimit) {
+        fireToast("🔒 Monthly limit reached — no expenses allowed!", "warning"); return { success: false };
+      }
+      if (stats.monthExpense + amt > monthlyLimit) {
+        const rem = monthlyLimit - stats.monthExpense;
+        fireToast(`🔒 Only ₹${n2(rem)} budget left — this expense is ₹${n2(amt)}.`, "warning");
+        return { success: false };
+      }
+    }
+
+    const entry = { id: Date.now(), type: fields.type, desc: fields.desc.trim(),
+      amount: amt, category: fields.category, date: fields.date, created: new Date().toISOString() };
+    setTransactions((prev) => [entry, ...prev]);
+    fireToast(fields.type === "income" ? "✅ Income added!" : "✅ Expense logged!", "success");
+    return { success: true };
+  }
+
+  function handleDelete(id) {
+    const tx = transactions.find((t) => t.id === id);
+    if (!tx) return;
+    setModal({
+      open: true, title: "Delete Transaction",
+      body: `<p>Are you sure you want to delete <strong>"${tx.desc}"</strong>?</p><p style="color:var(--muted);margin-top:6px;font-size:.88rem;">This action cannot be undone.</p>`,
+      buttons: [
+        { label: "Cancel" },
+        { label: "🗑️ Delete", primary: true, action: () => {
+          setTransactions((prev) => prev.filter((t) => t.id !== id));
+          if (editingId === id) setEditingId(null);
+          modalShownRef.current = false;
+          fireToast("🗑️ Transaction deleted.", "remove");
+        }},
+      ],
+    });
+  }
+
+  function handleSetLimit() {
+    const v = parseFloat(limitInput);
+    if (!v || v <= 0) { fireToast("⚠️ Enter a valid limit amount.", "warning"); return; }
+    setMonthlyLimit(v); modalShownRef.current = false;
+    fireToast(`🎯 Limit set to ${fmt(v)}`, "success");
+  }
+
+  function handleClearLimit() {
+    setMonthlyLimit(0); setLimitInput(""); modalShownRef.current = false;
+    fireToast("✅ Budget limit removed.", "success");
+  }
+
+  function handleExportCSV() {
+    const ok = exportCSV(transactions);
+    if (!ok) { fireToast("⚠️ No transactions to export.", "warning"); return; }
+    fireToast(`📥 Exported ${transactions.length} transactions.`, "success");
+  }
+
+  function toggleTheme() {
+    setTheme((t) => t === "dark" ? "light" : "dark");
+  }
+
+  const showAlert = !alertDismissed && budgetStatus.active && (budgetStatus.exceeded || budgetStatus.warning);
+
+  return (
+    <>
+      <div className="et-container">
+        {/* Header */}
+        <header className="et-header">
+          <div className="et-header-left">
+            <div className="et-logo">Expense<span>.</span></div>
+            <div className="et-date-badge">
+              {new Date().toLocaleDateString("en-IN", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+            </div>
+          </div>
+          <div className="et-header-actions">
+            <button className="et-hbtn" onClick={handleExportCSV}>📥 Export CSV</button>
+            <button className="et-icon-btn" onClick={toggleTheme} title="Toggle theme">
+              {theme === "dark" ? "☀️" : "🌙"}
+            </button>
+          </div>
+        </header>
+
+        {/* Budget Alert Banner */}
+        {showAlert && (
+          <div className={`et-alert ${budgetStatus.exceeded ? "exceeded" : "warning"}`}>
+            <div className="et-alert-icon">{budgetStatus.exceeded ? "🚨" : "⚠️"}</div>
+            <div className="et-alert-txt">
+              <div className="et-alert-title">
+                {budgetStatus.exceeded ? "Monthly Budget Exceeded!" : "Approaching Budget Limit!"}
+              </div>
+              <div className="et-alert-sub">
+                {budgetStatus.exceeded
+                  ? `Spent ${fmt(budgetStatus.used)} — ${fmt(budgetStatus.used - monthlyLimit)} over your ${fmt(monthlyLimit)} limit.`
+                  : `${budgetStatus.pct.toFixed(0)}% used — only ${fmt(budgetStatus.remaining)} remaining.`}
+              </div>
+            </div>
+            <button className="et-alert-x" onClick={() => setAlertDismissed(true)}>✕</button>
+          </div>
+        )}
+
+        {/* Summary Cards */}
+        <div className="et-summary">
+          {[
+            { cls: "bal", label: "Net Balance", val: fmt(stats.balance), icon: "⚖️" },
+            { cls: "inc", label: "Total Income",  val: fmt(stats.totalIncome), icon: "📈" },
+            { cls: "exp", label: "Total Expenses", val: fmt(stats.totalExpense), icon: "📉" },
+          ].map(({ cls, label, val, icon }) => (
+            <div key={cls} className={`et-card ${cls}`}>
+              <div className="et-card-label">{label}</div>
+              <div className="et-card-amount">{val}</div>
+              <div className="et-card-icon">{icon}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Main Grid */}
+        <div className="et-main-grid">
+          {/* LEFT: Form */}
+          <TransactionForm
+            editingTx={editingTx}
+            currentType={currentType}
+            setCurrentType={setCurrentType}
+            isBlocked={isExpenseBlocked}
+            monthlyLimit={monthlyLimit}
+            limitInput={limitInput}
+            setLimitInput={setLimitInput}
+            budgetStatus={budgetStatus}
+            onSubmit={handleSubmit}
+            onCancelEdit={() => setEditingId(null)}
+            onSetLimit={handleSetLimit}
+            onClearLimit={handleClearLimit}
+          />
+
+          {/* RIGHT */}
+          <div className="et-right-panel">
+            {/* Charts */}
+            <ChartPanel stats={stats} chartMode={chartMode} setChartMode={setChartMode} theme={theme} />
+
+            {/* Savings Bar */}
+            <div className="et-budget-bar">
+              <div className="et-budget-header">
+                <span>This Month's Savings Rate</span>
+                <span>{stats.savingsRate}%</span>
+              </div>
+              <div className="et-progress-track">
+                <div className="et-progress-fill" style={{ width: stats.savingsRate + "%" }} />
+              </div>
+            </div>
+
+            {/* Filters */}
+            <FiltersBar filter={filter} setFilter={setFilter} />
+
+            {/* List */}
+            <div>
+              <div className="et-list-header">
+                <div className="et-list-title">Transactions</div>
+              </div>
+              <TransactionList
+                filtered={filtered}
+                runningBalances={runningBal}
+                onEdit={(id) => { setEditingId(id); document.getElementById("formPanel")?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+                onDelete={handleDelete}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Toast */}
+      <div id="et-toast" className="et-toast" />
+
+      {/* Modal */}
+      <Modal modal={modal} onClose={() => setModal(null)} />
+    </>
+  );
+}
