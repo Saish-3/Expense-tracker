@@ -84,8 +84,8 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;bac
 .et-chart-tab.active,.et-chart-tab:hover{background:var(--accent);color:#0a0a0f;border-color:var(--accent);}
 .et-charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
 .et-chart-box-title{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:10px;}
-.et-chart-wrap{position:relative;width:100%;height:220px;background:var(--surface2);border-radius:10px;overflow:hidden;}
-.et-chart-wrap canvas{display:block;}
+.et-chart-wrap{position:relative;width:100%;height:220px;background:var(--surface2);border-radius:10px;overflow-x:auto;overflow-y:hidden;}
+.et-chart-wrap canvas{display:block;min-width:400px;}
 .et-budget-bar{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 20px;}
 .et-budget-header{display:flex;justify-content:space-between;font-size:.78rem;color:var(--muted);margin-bottom:9px;text-transform:uppercase;letter-spacing:.06em;}
 .et-progress-track{height:6px;background:var(--surface2);border-radius:100px;overflow:hidden;}

@@ -18,7 +18,8 @@ function animateTo(id, fromPcts, toPcts, drawFn) {
 function setupCanvas(canvas) {
   const wrap = canvas.parentElement;
   const dpr = window.devicePixelRatio || 1;
-  const w = wrap.clientWidth || 400, h = wrap.clientHeight || 220;
+  const wrapW = wrap.clientWidth || 400;
+  const w = Math.max(wrapW, 400), h = wrap.clientHeight || 220;
   canvas.width = w * dpr; canvas.height = h * dpr;
   canvas.style.width = w + "px"; canvas.style.height = h + "px";
   const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
