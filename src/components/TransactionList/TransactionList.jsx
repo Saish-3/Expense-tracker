@@ -28,6 +28,7 @@ function TransactionList({ filtered, runningBalances, onEdit, onDelete }) {
               <div className="et-tx-meta">
                 <span>{d}</span>
                 <span className="et-tx-cat">{t.category}</span>
+                {t.isRecurring && <span style={{ marginLeft: "6px", fontSize: "10px", padding: "2px 6px", background: "var(--et-primary)", color: "#fff", borderRadius: "10px", opacity: 0.85 }}>🔄 {t.frequency}</span>}
               </div>
             </div>
             <div className="et-tx-right">

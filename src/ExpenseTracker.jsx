@@ -13,6 +13,7 @@ import TransactionForm from "./components/TransactionForm/TransactionForm";
 import TransactionList from "./components/TransactionList/TransactionList";
 import FiltersBar from "./components/FiltersBar/FiltersBar";
 import MonthlyReport from "./components/MonthlyReport/MonthlyReport";
+import SubscriptionTracker from "./components/SubscriptionTracker/SubscriptionTracker";
 
 /* ═══════════════════════════════════════════════════════════════
    ROOT APP COMPONENT
@@ -38,6 +39,10 @@ export default function ExpenseTracker() {
     type: "all", period: "all", dateFrom: "", dateTo: "", search: "", sortBy: "date", sortDir: "desc"
   });
   const [showReport, setShowReport]   = useState(false);
+  const [showSubscriptions, setShowSubscriptions] = useState(false);
+  const [subscriptions, setSubscriptions] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("et_subscriptions") || "[]"); } catch { return []; }
+  });
 
   // Budget modal fire tracking
   const modalShownRef  = useRef(false);
@@ -47,6 +52,11 @@ export default function ExpenseTracker() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.transactions, JSON.stringify(transactions));
   }, [transactions]);
+
+  // ── Persist subscriptions ─────────────────────────────
+  useEffect(() => {
+    localStorage.setItem("et_subscriptions", JSON.stringify(subscriptions));
+  }, [subscriptions]);
 
   // ── Persist theme ─────────────────────────────────────
   useEffect(() => {
@@ -65,6 +75,57 @@ export default function ExpenseTracker() {
     if (document.getElementById("et-global-css")) return;
     const el = document.createElement("style"); el.id = "et-global-css"; el.textContent = GLOBAL_CSS;
     document.head.appendChild(el);
+  }, []);
+
+  // ── Auto-generate recurring transactions ──────────────
+  useEffect(() => {
+    if (transactions.length === 0) return;
+
+    let modified = false;
+    const newTx = [];
+    const today = new Date();
+    
+    const updatedTransactions = transactions.map(t => {
+      if (!t.isRecurring || !t.lastProcessed) return t;
+
+      let lastDate = new Date(t.lastProcessed);
+      let tModified = false;
+      let curT = { ...t };
+
+      while (true) {
+        let nextDate = new Date(lastDate);
+        if (t.frequency === "weekly") nextDate.setDate(nextDate.getDate() + 7);
+        else if (t.frequency === "yearly") nextDate.setFullYear(nextDate.getFullYear() + 1);
+        else nextDate.setMonth(nextDate.getMonth() + 1); // default monthly
+
+        // To safely compare without time, format nextDate to YYYY-MM-DD
+        const nextDateStr = nextDate.toISOString().split("T")[0];
+        const todayStr = today.toISOString().split("T")[0];
+
+        if (nextDateStr <= todayStr) {
+          lastDate = nextDate;
+          tModified = true;
+          modified = true;
+          curT.lastProcessed = nextDateStr;
+          
+          newTx.push({
+            ...t,
+            id: Date.now() + Math.random(),
+            date: nextDateStr,
+            created: new Date().toISOString()
+          });
+        } else {
+          break;
+        }
+      }
+      return curT;
+    });
+
+    if (modified) {
+      setTransactions([...newTx, ...updatedTransactions]);
+      setTimeout(() => fireToast(`🔄 Auto-logged ${newTx.length} recurring transaction(s).`, "success"), 500);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Derived stats (memoized) ──────────────────────────
@@ -154,10 +215,31 @@ export default function ExpenseTracker() {
     }
 
     const entry = { id: Date.now(), type: fields.type, desc: fields.desc.trim(),
-      amount: amt, category: fields.category, date: fields.date, created: new Date().toISOString() };
+      amount: amt, category: fields.category, date: fields.date, created: new Date().toISOString(),
+      isRecurring: fields.isRecurring, frequency: fields.frequency, lastProcessed: fields.isRecurring ? fields.date : null };
     setTransactions((prev) => [entry, ...prev]);
     fireToast(fields.type === "income" ? "✅ Income added!" : "✅ Expense logged!", "success");
     return { success: true };
+  }
+
+  function handleClearHistory() {
+    if (transactions.length === 0) {
+      fireToast("⚠️ History is already empty.", "warning");
+      return;
+    }
+    setModal({
+      open: true, title: "Clear History",
+      body: `<p>Are you sure you want to delete <strong>ALL</strong> transactions?</p><p style="color:var(--danger);margin-top:6px;font-size:.88rem;font-weight:bold;">This action cannot be undone.</p>`,
+      buttons: [
+        { label: "Cancel" },
+        { label: "🗑️ Clear All", primary: true, action: () => {
+          setTransactions([]);
+          setEditingId(null);
+          modalShownRef.current = false;
+          fireToast("🗑️ All transactions cleared.", "remove");
+        }},
+      ],
+    });
   }
 
   function handleDelete(id) {
@@ -214,6 +296,7 @@ export default function ExpenseTracker() {
             </div>
           </div>
           <div className="et-header-actions">
+            <button className="et-hbtn" onClick={() => setShowSubscriptions(true)}>💳 Subscriptions</button>
             <button className="et-hbtn" onClick={() => setShowReport(true)}>📊 Monthly Report</button>
             <button className="et-hbtn" onClick={handleExportCSV}>📥 Export CSV</button>
             <button className="et-icon-btn" onClick={toggleTheme} title="Toggle theme">
@@ -294,8 +377,11 @@ export default function ExpenseTracker() {
 
             {/* List */}
             <div>
-              <div className="et-list-header">
+              <div className="et-list-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div className="et-list-title">Transactions</div>
+                <button className="et-hbtn" style={{ color: '#ff5e5e', borderColor: 'rgba(255,94,94,0.3)' }} onClick={handleClearHistory} title="Clear all transactions">
+                  🗑️ Clear All
+                </button>
               </div>
               <TransactionList
                 filtered={filtered}
@@ -316,6 +402,9 @@ export default function ExpenseTracker() {
 
       {/* Monthly Report */}
       {showReport && <MonthlyReport txs={transactions} onClose={() => setShowReport(false)} />}
+
+      {/* Subscription Tracker */}
+      {showSubscriptions && <SubscriptionTracker subscriptions={subscriptions} setSubscriptions={setSubscriptions} onClose={() => setShowSubscriptions(false)} />}
     </>
   );
 }

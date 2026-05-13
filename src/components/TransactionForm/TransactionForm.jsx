@@ -10,6 +10,8 @@ function TransactionForm({ editingTx, currentType, setCurrentType, isBlocked, mo
   const [amount, setAmount] = useState("");
   const [category, setCat]  = useState("");
   const [date, setDate]     = useState(todayStr());
+  const [isRecurring, setIsRecurring] = useState(false);
+  const [frequency, setFrequency] = useState("monthly");
   const descRef = useRef(null);
 
   const cats = currentType === "income" ? INCOME_CATS : EXPENSE_CATS;
@@ -20,6 +22,8 @@ function TransactionForm({ editingTx, currentType, setCurrentType, isBlocked, mo
       setDesc(editingTx.desc);
       setAmount(String(editingTx.amount));
       setDate(editingTx.date);
+      setIsRecurring(editingTx.isRecurring || false);
+      setFrequency(editingTx.frequency || "monthly");
       // category set after type switch (cats list changes)
       setTimeout(() => setCat(editingTx.category), 0);
     }
@@ -39,12 +43,12 @@ function TransactionForm({ editingTx, currentType, setCurrentType, isBlocked, mo
   useEffect(() => { descRef.current?.focus(); }, []);
 
   function reset() {
-    setDesc(""); setAmount(""); setDate(todayStr());
+    setDesc(""); setAmount(""); setDate(todayStr()); setIsRecurring(false); setFrequency("monthly");
     setTimeout(() => descRef.current?.focus(), 0);
   }
 
   function handleSubmit() {
-    const result = onSubmit({ type: currentType, desc, amount, category, date });
+    const result = onSubmit({ type: currentType, desc, amount, category, date, isRecurring, frequency });
     if (result?.success) reset();
   }
 
@@ -99,6 +103,19 @@ function TransactionForm({ editingTx, currentType, setCurrentType, isBlocked, mo
           <input ref={dateRef} className="et-input" type="date" value={date}
             onChange={(e) => setDate(e.target.value)}
             onKeyDown={(e) => handleKeyDown(e, null)} />
+        </div>
+        <div className="et-form-group" style={{ marginBottom: "15px" }}>
+          <label className="et-label" style={{ display: "flex", alignItems: "center", cursor: "pointer" }}>
+            <input type="checkbox" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} style={{ marginRight: "8px", width: "16px", height: "16px", accentColor: "var(--et-primary)" }} />
+            Is Recurring?
+          </label>
+          {isRecurring && (
+            <select className="et-input" style={{ marginTop: "8px" }} value={frequency} onChange={(e) => setFrequency(e.target.value)}>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="yearly">Yearly</option>
+            </select>
+          )}
         </div>
       </div>
 
