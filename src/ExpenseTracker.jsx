@@ -12,6 +12,7 @@ import ChartPanel from "./components/ChartPanel/ChartPanel";
 import TransactionForm from "./components/TransactionForm/TransactionForm";
 import TransactionList from "./components/TransactionList/TransactionList";
 import FiltersBar from "./components/FiltersBar/FiltersBar";
+import MonthlyReport from "./components/MonthlyReport/MonthlyReport";
 
 /* ═══════════════════════════════════════════════════════════════
    ROOT APP COMPONENT
@@ -36,6 +37,7 @@ export default function ExpenseTracker() {
   const [filter, setFilter]           = useState({
     type: "all", period: "all", dateFrom: "", dateTo: "", search: "", sortBy: "date", sortDir: "desc"
   });
+  const [showReport, setShowReport]   = useState(false);
 
   // Budget modal fire tracking
   const modalShownRef  = useRef(false);
@@ -212,6 +214,7 @@ export default function ExpenseTracker() {
             </div>
           </div>
           <div className="et-header-actions">
+            <button className="et-hbtn" onClick={() => setShowReport(true)}>📊 Monthly Report</button>
             <button className="et-hbtn" onClick={handleExportCSV}>📥 Export CSV</button>
             <button className="et-icon-btn" onClick={toggleTheme} title="Toggle theme">
               {theme === "dark" ? "☀️" : "🌙"}
@@ -310,6 +313,9 @@ export default function ExpenseTracker() {
 
       {/* Modal */}
       <Modal modal={modal} onClose={() => setModal(null)} />
+
+      {/* Monthly Report */}
+      {showReport && <MonthlyReport txs={transactions} onClose={() => setShowReport(false)} />}
     </>
   );
 }
