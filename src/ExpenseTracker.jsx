@@ -14,6 +14,7 @@ import TransactionList from "./components/TransactionList/TransactionList";
 import FiltersBar from "./components/FiltersBar/FiltersBar";
 import MonthlyReport from "./components/MonthlyReport/MonthlyReport";
 import SubscriptionTracker from "./components/SubscriptionTracker/SubscriptionTracker";
+import PricingModal from "./components/PricingModal/PricingModal";
 
 /* ═══════════════════════════════════════════════════════════════
    ROOT APP COMPONENT
@@ -40,6 +41,7 @@ export default function ExpenseTracker() {
   });
   const [showReport, setShowReport]   = useState(false);
   const [showSubscriptions, setShowSubscriptions] = useState(false);
+  const [showPricing, setShowPricing] = useState(false);
   const [subscriptions, setSubscriptions] = useState(() => {
     try { return JSON.parse(localStorage.getItem("et_subscriptions") || "[]"); } catch { return []; }
   });
@@ -296,6 +298,7 @@ export default function ExpenseTracker() {
             </div>
           </div>
           <div className="et-header-actions">
+            <button className="et-hbtn" style={{ color: "var(--et-bg)", background: "var(--et-accent)", borderColor: "var(--et-accent)", fontWeight: "bold" }} onClick={() => setShowPricing(true)}>⭐ Upgrade to Pro</button>
             <button className="et-hbtn" onClick={() => setShowSubscriptions(true)}>💳 Subscriptions</button>
             <button className="et-hbtn" onClick={() => setShowReport(true)}>📊 Monthly Report</button>
             <button className="et-hbtn" onClick={handleExportCSV}>📥 Export CSV</button>
@@ -405,6 +408,9 @@ export default function ExpenseTracker() {
 
       {/* Subscription Tracker */}
       {showSubscriptions && <SubscriptionTracker subscriptions={subscriptions} setSubscriptions={setSubscriptions} onClose={() => setShowSubscriptions(false)} />}
+
+      {/* Pricing Modal */}
+      {showPricing && <PricingModal onClose={() => setShowPricing(false)} />}
     </>
   );
 }
