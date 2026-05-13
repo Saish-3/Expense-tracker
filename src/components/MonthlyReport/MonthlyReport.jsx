@@ -51,7 +51,7 @@ function MonthlyReport({ txs, onClose }) {
   const formatCurrency = (val) => `₹${val.toFixed(2)}`;
 
   return (
-    <div className="et-modal-overlay">
+    <div className="et-modal-overlay show">
       <div className="et-modal et-modal-report">
         <div className="et-modal-header">
           <h3>Monthly Financial Report</h3>

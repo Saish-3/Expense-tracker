@@ -54,7 +54,7 @@ function SubscriptionTracker({ subscriptions, setSubscriptions, onClose }) {
   const formatCycle = (c) => c.charAt(0).toUpperCase() + c.slice(1);
 
   return (
-    <div className="et-modal-overlay">
+    <div className="et-modal-overlay show">
       <div className="et-modal et-modal-report" style={{ maxWidth: "600px", width: "95%" }}>
         <div className="et-modal-header">
           <h3>💳 Subscription Tracker</h3>
